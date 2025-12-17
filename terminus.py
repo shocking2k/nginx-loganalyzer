@@ -4,23 +4,35 @@ import streamlit as st
 import os
 import shutil
 
+# Use full path to terminus binary to ensure it's found when run from Streamlit
+TERMINUS_BIN = "/opt/homebrew/bin/terminus"
+
 def get_site_list():
     try:
+        env = os.environ.copy()
+        env['TERMINUS_ALLOW_UNSUPPORTED_NEWER_PHP'] = '1'
         result = subprocess.run(
-            ["terminus", "site:list", "--format=json"],
-            capture_output=True, text=True, check=True
+            [TERMINUS_BIN, "site:list", "--format=json"],
+            capture_output=True, text=True, check=True, env=env
         )
         sites = json.loads(result.stdout)
         return sorted([v["name"] for v in sites.values()])
+    except subprocess.CalledProcessError as e:
+        st.error(f"Could not fetch site list: {e}")
+        st.error(f"STDOUT: {e.stdout}")
+        st.error(f"STDERR: {e.stderr}")
+        return []
     except Exception as e:
         st.warning(f"Could not fetch site list: {e}")
         return []
 
 def get_env_list(site_name):
     try:
+        env = os.environ.copy()
+        env['TERMINUS_ALLOW_UNSUPPORTED_NEWER_PHP'] = '1'
         result = subprocess.run(
-            ["terminus", "env:list", site_name, "--format=json"],
-            capture_output=True, text=True, check=True
+            [TERMINUS_BIN, "env:list", site_name, "--format=json"],
+            capture_output=True, text=True, check=True, env=env
         )
         envs = json.loads(result.stdout)
         return sorted(envs.keys())
@@ -30,9 +42,11 @@ def get_env_list(site_name):
 
 def get_site_uuid(site_name):
     try:
+        env = os.environ.copy()
+        env['TERMINUS_ALLOW_UNSUPPORTED_NEWER_PHP'] = '1'
         result = subprocess.run(
-            ["terminus", "site:list", "--format=json"],
-            capture_output=True, text=True, check=True
+            [TERMINUS_BIN, "site:list", "--format=json"],
+            capture_output=True, text=True, check=True, env=env
         )
         sites = json.loads(result.stdout)
         return next((k for k, v in sites.items() if v["name"].lower() == site_name.lower()), None)

@@ -20,6 +20,23 @@
     - Detects potential SQL injection attempts.
     - Detects potential XSS attacks.
     - **AbuseIPDB Integration:** Check IPs with high error rates against the AbuseIPDB database.
+- **Performance Metrics:**
+    - Analyze response times (if logs include `$request_time`).
+    - Identify busiest and most problematic endpoints by error rate.
+    - Analyze bandwidth usage by file type.
+    - Analyze cache performance (hit/miss rates).
+    - Breakdown of HTTP methods used.
+    - Analyze traffic patterns over time (hourly, daily).
+    - Detailed status code distribution.
+    - Overall performance summary.
+- **WordPress Specific Analysis:**
+    - Detect installed plugins and themes.
+    - Monitor `wp-admin` access.
+    - Analyze `xmlrpc.php` activity for potential abuse.
+    - Detect `wp-login.php` brute force attempts.
+    - Identify various WordPress attack patterns (e.g., theme/plugin editor access, user enumeration, config file access, webshell probes).
+    - Detect potential update and maintenance windows.
+    - Analyze `wp-cron.php` activity.
 - **PHP Error Log Analysis:**
     - View and filter PHP errors by severity (Fatal Error, Warning, Info/Notice).
     - Dropdown filter for error type in the PHP Errors tab.
@@ -46,6 +63,7 @@ See `requirements.txt`:
 ```
 streamlit
 pandas
+numpy
 plotly
 requests
 ```
@@ -72,6 +90,66 @@ pip install -r requirements.txt
     ```
     streamlit run main.py
     ```
+
+## Running with Docker
+
+You can run the Nginx Log Analyzer using Docker, which includes all dependencies (including goaccess).
+
+### Building the Docker Image
+
+```bash
+docker build -t nginx-loganalyzer .
+```
+
+### Running the Container
+
+**Basic run:**
+```bash
+docker run -p 8501:8501 nginx-loganalyzer
+```
+
+**With Terminus authentication and SSH access:**
+
+To use Pantheon/Terminus integration, you'll need to mount your Terminus configuration and SSH keys:
+
+```bash
+docker run -p 8501:8501 \
+  -v ~/.terminus:/root/.terminus:ro \
+  -v ~/.ssh:/root/.ssh:ro \
+  -v ~/site-logs:/root/site-logs \
+  nginx-loganalyzer
+```
+
+**Explanation of volume mounts:**
+- `-v ~/.terminus:/root/.terminus:ro` - Mounts your Terminus configuration (read-only)
+- `-v ~/.ssh:/root/.ssh:ro` - Mounts your SSH keys for SFTP access (read-only)
+- `-v ~/site-logs:/root/site-logs` - Mounts the logs directory (read-write) so logs persist
+
+### Accessing the Application
+
+Once the container is running, open your browser and navigate to:
+```
+http://localhost:8501
+```
+
+### Docker Notes
+
+- The Docker image includes `goaccess` pre-installed
+- Logs are stored in `~/site-logs` by default (mounted as a volume)
+- You must have Terminus CLI authenticated on your host machine before running
+- SSH keys must be properly configured for Pantheon SFTP access
+
+### Docker Hub
+
+This image is also available on Docker Hub:
+```bash
+docker pull curthayman/nginx-loganalyzer
+docker run -p 8501:8501 \
+  -v ~/.terminus:/root/.terminus:ro \
+  -v ~/.ssh:/root/.ssh:ro \
+  -v ~/site-logs:/root/site-logs \
+  curthayman/nginx-loganalyzer
+```
 
 ## In the sidebar:
 

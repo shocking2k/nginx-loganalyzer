@@ -1,2 +1,6 @@
 .idea/
 nginx_dashboard.py
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
