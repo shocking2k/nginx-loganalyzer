@@ -3,6 +3,8 @@ import json
 import streamlit as st
 import os
 import shutil
+from datetime import datetime
+from archive_manager import archive_current_logs, cleanup_old_archives, CURRENT_DIR, DEFAULT_RETENTION_DAYS
 
 # Use full path to terminus binary to ensure it's found when run from Streamlit
 TERMINUS_BIN = "/opt/homebrew/bin/terminus"
@@ -55,9 +57,30 @@ def get_site_uuid(site_name):
         return None
 
 def collect_logs(site_uuid, env, site_name):
-    logs_dir = os.path.expanduser(f"~/site-logs/{site_name}_{env}")
+    # Use new directory structure: ~/site-logs/current/{site}_{env}
+    logs_dir = os.path.join(CURRENT_DIR, f"{site_name}_{env}")
+
+    # Archive existing logs if they exist (automatic archiving)
     if os.path.exists(logs_dir):
+        yield "Archiving existing logs..."
+        try:
+            archive_path = archive_current_logs(site_name, env, datetime.now().date())
+            if archive_path:
+                yield f"Archived logs to: {archive_path}"
+        except Exception as e:
+            yield f"Warning: Failed to archive logs: {e}"
+
+        # Remove current logs after archiving
         shutil.rmtree(logs_dir)
+
+    # Cleanup old archives (older than retention period)
+    try:
+        deleted_count = cleanup_old_archives(DEFAULT_RETENTION_DAYS)
+        if deleted_count > 0:
+            yield f"Cleaned up {deleted_count} old archive(s) (>{DEFAULT_RETENTION_DAYS} days)"
+    except Exception as e:
+        yield f"Warning: Failed to cleanup old archives: {e}"
+
     os.makedirs(logs_dir, exist_ok=True)
 
     app_servers = subprocess.check_output(

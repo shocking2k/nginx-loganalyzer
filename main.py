@@ -1,11 +1,11 @@
 import os
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.express as px
 import shutil
 
-from log_parser import parse_nginx_log, parse_php_error_log
+from log_parser import parse_nginx_log, parse_php_error_log, parse_compressed_nginx_log
 from analysis import detect_brute_force, detect_sql_injection, detect_xss, check_abuseipdb
 from terminus import get_site_list, get_env_list, get_site_uuid, collect_logs
 from ui import generate_goaccess_report
@@ -17,6 +17,9 @@ from performance_metrics import (identify_slow_endpoints, analyze_bandwidth_usag
                                   analyze_cache_performance, analyze_request_methods,
                                   analyze_traffic_patterns, analyze_status_code_distribution,
                                   get_performance_summary)
+from archive_manager import (CURRENT_DIR, ARCHIVE_DIR, search_logs_by_ip,
+                             search_logs_by_date_range, get_archived_collections,
+                             get_archive_statistics, extract_compressed_log)
 
 st.set_page_config(layout="wide", page_title="Nginx Log Analyzer V2")
 st.title("📊Nginx Log Analyzer V2")
@@ -30,7 +33,7 @@ st.markdown("""
 
 logs_dir = None
 if 'site_name' in st.session_state and 'env' in st.session_state:
-    logs_dir = os.path.expanduser(f"~/site-logs/{st.session_state['site_name']}_{st.session_state['env']}")
+    logs_dir = os.path.join(CURRENT_DIR, f"{st.session_state['site_name']}_{st.session_state['env']}")
 
 with st.sidebar:
     st.header("Configuration")
@@ -59,9 +62,96 @@ with st.sidebar:
 
     st.session_state['abuseipdb_api_key'] = st.text_input("AbuseIPDB API Key (Optional)", type="password", help="Get your API key at https://www.abuseipdb.com/register")
 
+    st.markdown("---")
+    st.header("Historical Search")
+
+    # Date range picker with presets
+    date_preset = st.selectbox("Quick Select",
+        ["Last 7 Days", "Last 30 Days", "Last 90 Days", "Custom Range"],
+        key="date_preset")
+
+    if date_preset == "Custom Range":
+        date_range = st.date_input("Date Range",
+            value=(datetime.now().date() - timedelta(days=7), datetime.now().date()),
+            key="custom_date_range")
+    else:
+        # Auto-calculate based on preset
+        if date_preset == "Last 7 Days":
+            days = 7
+        elif date_preset == "Last 30 Days":
+            days = 30
+        else:  # Last 90 Days
+            days = 90
+        date_range = (datetime.now().date() - timedelta(days=days), datetime.now().date())
+
+    # Site filter (all sites or specific site)
+    search_all_sites = st.checkbox("Search all sites", value=True, key="search_all_sites")
+
+    # IP filter
+    ip_filter = st.text_input("Filter by IP Address (optional)", key="ip_filter")
+
+    # Additional filters
+    status_filter_options = st.multiselect("Status Codes (optional)",
+        ["2xx Success", "3xx Redirect", "4xx Client Error", "5xx Server Error"],
+        default=[], key="status_filter")
+
+    if st.button("Search Historical Logs"):
+        with st.spinner("Searching archives..."):
+            # Convert status filter labels to code ranges
+            status_codes = []
+            for status_label in status_filter_options:
+                if "2xx" in status_label:
+                    status_codes.append("2xx")
+                elif "3xx" in status_label:
+                    status_codes.append("3xx")
+                elif "4xx" in status_label:
+                    status_codes.append("4xx")
+                elif "5xx" in status_label:
+                    status_codes.append("5xx")
+
+            # Determine search scope
+            search_site_name = None if search_all_sites else site_name
+            search_env = None if search_all_sites else env
+
+            # Perform search
+            if ip_filter:
+                # IP-based search
+                results = search_logs_by_ip(
+                    ip_filter,
+                    start_date=date_range[0] if isinstance(date_range, tuple) else date_range,
+                    end_date=date_range[1] if isinstance(date_range, tuple) and len(date_range) > 1 else date_range,
+                    site_name=search_site_name,
+                    env=search_env
+                )
+            else:
+                # Date range search
+                results = search_logs_by_date_range(
+                    start_date=date_range[0] if isinstance(date_range, tuple) else date_range,
+                    end_date=date_range[1] if isinstance(date_range, tuple) and len(date_range) > 1 else date_range,
+                    site_name=search_site_name,
+                    env=search_env,
+                    status_codes=status_codes if status_codes else None
+                )
+
+            # Store results in session state
+            st.session_state['search_results'] = results
+            st.session_state['search_params'] = {
+                'date_range': date_range,
+                'ip_filter': ip_filter,
+                'status_filter': status_filter_options,
+                'all_sites': search_all_sites
+            }
+
+            if results:
+                st.success(f"Found {len(results)} matching log entries!")
+            else:
+                st.info("No matching logs found.")
+
+    st.markdown("---")
+
     log_container = st.container()
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     if col1.button("Collect Logs"):
         with st.spinner("Collecting logs..."):
             site_uuid = get_site_uuid(site_name)
@@ -80,7 +170,7 @@ with st.sidebar:
                 st.error("Invalid site name")
 
     if col2.button("Clear Logs"):
-        logs_dir_temp = os.path.expanduser(f"~/site-logs")
+        logs_dir_temp = CURRENT_DIR
         if os.path.exists(logs_dir_temp):
             try:
                 # Delete only the contents of the directory, not the directory itself
@@ -99,6 +189,36 @@ with st.sidebar:
                 st.error(f"Failed to clear logs: {str(e)}")
         else:
             st.warning("No logs directory found to clear.")
+
+    if col3.button("Archive All Current"):
+        with st.spinner("Archiving all current logs..."):
+            from archive_manager import archive_current_logs
+            archived_count = 0
+            archived_sites = []
+
+            # Find all site directories in current/
+            if os.path.exists(CURRENT_DIR):
+                for site_env_dir in os.listdir(CURRENT_DIR):
+                    site_env_path = os.path.join(CURRENT_DIR, site_env_dir)
+                    if os.path.isdir(site_env_path):
+                        # Parse site_name and env from directory name
+                        parts = site_env_dir.rsplit('_', 1)
+                        if len(parts) == 2:
+                            site_name_to_archive, env_to_archive = parts
+                            try:
+                                archive_path = archive_current_logs(site_name_to_archive, env_to_archive, datetime.now().date())
+                                if archive_path:
+                                    archived_count += 1
+                                    archived_sites.append(f"{site_name_to_archive} ({env_to_archive})")
+                            except Exception as e:
+                                st.warning(f"Failed to archive {site_env_dir}: {e}")
+
+                if archived_count > 0:
+                    st.success(f"Archived {archived_count} site(s): {', '.join(archived_sites)}")
+                else:
+                    st.info("No current logs found to archive")
+            else:
+                st.warning("No current logs directory found")
 
     if st.button("Generate Report"):
         if logs_dir and os.path.exists(logs_dir):
@@ -126,15 +246,88 @@ with st.sidebar:
 
 logs_dir = None
 if 'site_name' in st.session_state and 'env' in st.session_state:
-    logs_dir = os.path.expanduser(f"~/site-logs/{st.session_state['site_name']}_{st.session_state['env']}")
+    logs_dir = os.path.join(CURRENT_DIR, f"{st.session_state['site_name']}_{st.session_state['env']}")
+
+# Display search results in main section (independent of current logs)
+if 'search_results' in st.session_state and st.session_state['search_results']:
+    st.markdown("### 🔍 Historical Search Results")
+    search_params = st.session_state.get('search_params', {})
+
+    # Display search summary
+    results_df = pd.DataFrame(st.session_state['search_results'])
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Results", len(results_df))
+    with col2:
+        st.metric("Unique IPs", results_df['ip_address'].nunique() if 'ip_address' in results_df.columns else 0)
+    with col3:
+        st.metric("Sites Found", results_df['site_name'].nunique() if 'site_name' in results_df.columns else 0)
+    with col4:
+        date_range = search_params.get('date_range', '')
+        if isinstance(date_range, tuple):
+            st.metric("Date Range", f"{date_range[0]} to {date_range[1]}")
+
+    # Show breakdown by site/environment
+    if 'site_name' in results_df.columns and 'environment' in results_df.columns:
+        st.subheader("Results by Site")
+        site_summary = results_df.groupby(['site_name', 'environment']).agg({
+            'ip_address': 'count',
+            'status_code': lambda x: f"{(x >= 400).sum()}/{len(x)}"
+        }).reset_index()
+        site_summary.columns = ['Site', 'Environment', 'Requests', 'Errors']
+
+        # Make it more readable
+        site_summary['Site/Env'] = site_summary['Site'] + ' (' + site_summary['Environment'] + ')'
+        display_summary = site_summary[['Site/Env', 'Requests', 'Errors']]
+
+        st.dataframe(display_summary, width='stretch', hide_index=True)
+
+    # Display preview table
+    st.subheader("Detailed Results (first 1000 entries)")
+    preview_df = results_df.head(1000).copy()
+    if not preview_df.empty:
+        # Format timestamp for better readability
+        if 'log_timestamp' in preview_df.columns:
+            preview_df['timestamp'] = pd.to_datetime(preview_df['log_timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Create a combined site column for clarity
+        if 'site_name' in preview_df.columns and 'environment' in preview_df.columns:
+            preview_df['site'] = preview_df['site_name'] + ' (' + preview_df['environment'] + ')'
+
+        # Format for display with better column order
+        display_cols = ['timestamp', 'site', 'ip_address', 'status_code', 'method', 'path']
+        available_cols = [col for col in display_cols if col in preview_df.columns]
+
+        # Rename columns for display
+        column_names = {
+            'timestamp': 'Time',
+            'site': 'Site',
+            'ip_address': 'IP Address',
+            'status_code': 'Status',
+            'method': 'Method',
+            'path': 'Path'
+        }
+
+        display_df = preview_df[available_cols].rename(columns=column_names)
+        st.dataframe(display_df, width='stretch', hide_index=True)
+
+        # Download option
+        st.download_button(
+            label="Download Full Search Results as CSV",
+            data=results_df.to_csv(index=False),
+            file_name=f"search_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+
+    st.markdown("---")
 
 if logs_dir and os.path.exists(logs_dir):
     if 'site_name' in st.session_state and st.session_state['site_name']:
         env_display = st.session_state['env'] if 'env' in st.session_state else ''
         st.info(f"Currently displaying logs for: **{st.session_state['site_name']}** ({env_display})")
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs(
         ["Overview", "Requests", "Errors", "Security", "File Types", "Bot & Crawler Detection",
-         "Advanced Security", "PHP Errors", "WordPress Analysis", "Performance Metrics"])
+         "Advanced Security", "PHP Errors", "WordPress Analysis", "Performance Metrics", "Archive Management"])
 
     all_logs = []
     php_error_logs = []
@@ -683,6 +876,100 @@ if logs_dir and os.path.exists(logs_dir):
 
         else:
             st.info("No logs available for performance analysis")
+
+    with tab11:
+        st.header("Archive Management")
+
+        # Get archive statistics
+        archive_stats = get_archive_statistics()
+
+        # Display overall statistics
+        st.subheader("Archive Statistics")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Collections", f"{archive_stats.get('total_collections', 0):,}")
+        with col2:
+            st.metric("Total Requests", f"{archive_stats.get('total_requests', 0):,}")
+        with col3:
+            st.metric("Unique IPs", f"{archive_stats.get('unique_ips', 0):,}")
+        with col4:
+            st.metric("Storage Used", f"{archive_stats.get('total_size_gb', 0):.2f} GB")
+
+        if archive_stats.get('oldest_date'):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Oldest Archive", archive_stats.get('oldest_date'))
+            with col2:
+                st.metric("Newest Archive", archive_stats.get('newest_date'))
+
+        st.markdown("---")
+
+        # List all archived collections
+        st.subheader("Archived Collections")
+
+        # Filter options
+        filter_col1, filter_col2 = st.columns(2)
+        with filter_col1:
+            filter_site = st.selectbox("Filter by Site", ["All Sites"] + (site_list if site_list else []), key="archive_filter_site")
+        with filter_col2:
+            filter_env = st.selectbox("Filter by Environment", ["All Environments", "dev", "test", "live"], key="archive_filter_env")
+
+        # Get archived collections with filters
+        collections = get_archived_collections(
+            site_name=None if filter_site == "All Sites" else filter_site,
+            env=None if filter_env == "All Environments" else filter_env
+        )
+
+        if collections:
+            # Convert to DataFrame for display
+            collections_df = pd.DataFrame(collections)
+
+            # Format for display
+            display_df = collections_df[['site_name', 'environment', 'collection_date', 'total_requests', 'unique_ips', 'compressed_size_mb']].copy()
+            display_df.columns = ['Site', 'Environment', 'Date', 'Requests', 'Unique IPs', 'Size (MB)']
+            display_df['Size (MB)'] = display_df['Size (MB)'].round(2)
+
+            st.dataframe(display_df, width='stretch')
+
+            # Show retention info
+            st.info(f"📅 Archives are automatically retained for **90 days**. Older archives are cleaned up when collecting new logs.")
+
+            # Manual cleanup option
+            st.markdown("---")
+            st.subheader("Manual Cleanup")
+            st.warning("⚠️ Use this with caution. This will permanently delete archives older than the specified retention period.")
+
+            cleanup_days = st.number_input("Delete archives older than (days)", min_value=1, max_value=365, value=90, key="cleanup_days")
+
+            if st.button("Delete Old Archives", type="secondary"):
+                with st.spinner("Cleaning up old archives..."):
+                    from archive_manager import cleanup_old_archives
+                    deleted_count = cleanup_old_archives(cleanup_days)
+                    if deleted_count > 0:
+                        st.success(f"Deleted {deleted_count} archive(s) older than {cleanup_days} days")
+                        st.experimental_rerun()
+                    else:
+                        st.info(f"No archives older than {cleanup_days} days found")
+
+        else:
+            st.info("No archived collections found. Archives will be created automatically when you collect logs.")
+
+        # Instructions
+        st.markdown("---")
+        st.markdown("""
+        ### How Archiving Works
+
+        - **Automatic**: Every time you click "Collect Logs", existing logs are automatically archived
+        - **Compressed**: Archives are compressed with gzip (~90% size reduction)
+        - **Searchable**: Use the "Historical Search" section in the sidebar to search archives
+        - **Retention**: Archives are kept for 90 days by default
+        - **Compliance**: Each archive includes metadata.json with checksums for audit trails
+
+        ### Storage Estimates
+        - **Per site**: ~1.4GB for 90 days of compressed logs
+        - **5 sites**: ~7GB for 90 days
+        - **Database index**: ~1-2GB for 90 days of all sites combined
+        """)
 
 else:
     st.info("Select site and env to begin analysis")

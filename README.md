@@ -6,8 +6,17 @@
 
 ## Features
 
+### Core Analysis Features
+
 - **Site & Environment Dropdowns:** Select Pantheon sites and environments dynamically.
 - **Log Collection:** Download logs from all app servers for the selected site/environment.
+- **Automated Collection:** Use `auto_collect_logs.py` for cron-based scheduled collection (NEW!)
+- **Historical Log Archiving:** Automatically archive logs with 90-day retention for compliance (NEW!)
+  - Automatic gzip compression (~90% size reduction)
+  - SQLite indexing for instant searches across months of data
+  - Immutable archives with SHA256 checksums for audit trails
+  - Automatic cleanup of archives older than retention period
+- **Cross-Site Search:** Search all sites by IP address and date range across archived logs (NEW!)
 - **Log Clearing:** Clear cached logs to start a fresh analysis.
 - **Traffic Overview:** Visualize total requests, unique IPs, error rates, and request trends.
 - **Request Analysis:** See top paths, status codes, user agents, visitor IPs/hostnames, and top referrers.
@@ -76,6 +85,8 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Interactive Dashboard
+
 1.  **Clone this repository and install requirements:**
     ```
     git clone https://github.com/curthayman/nginx-loganalyzer.git
@@ -90,6 +101,33 @@ pip install -r requirements.txt
     ```
     streamlit run main.py
     ```
+
+### Automated Log Collection
+
+For automated log collection (ideal for scheduled compliance archiving), use the `auto_collect_logs.py` script:
+
+```bash
+# Run manually
+python3 auto_collect_logs.py
+
+# Or set up a cron job for daily collection at 2 AM
+0 2 * * * /usr/bin/python3 /path/to/auto_collect_logs.py >> /var/log/log-collector.log 2>&1
+```
+
+**Features of auto_collect_logs.py:**
+- Automatically collects logs from all sites (configurable environments)
+- Archives existing logs before collecting new ones
+- Compresses archives with gzip (~90% size reduction)
+- Indexes logs to SQLite for fast historical searches
+- Cleans up archives older than retention period (default: 90 days)
+- Provides detailed success/error reporting
+- No Streamlit dependency - runs standalone
+
+**Customize environments to collect:**
+Edit the `environments` list in the script (default is `['live']`):
+```python
+environments = ['live', 'test', 'dev']  # Collect from multiple environments
+```
 
 ## Running with Docker
 
@@ -154,9 +192,53 @@ docker run -p 8501:8501 \
 ## In the sidebar:
 
 - Select a site and environment from the dropdowns.
-- Click **"Collect Logs"** to fetch and analyze logs.
+- Use **Historical Search** to find logs by IP address or date range across all sites.
+- Click **"Collect Logs"** to fetch and analyze logs (automatically archives existing logs).
 - Click **"Clear Logs"** to remove all downloaded logs.
 - Click **"Generate Report"** to create a `goaccess` HTML report.
+
+## Historical Search (NEW!)
+
+The Historical Search feature allows you to search through archived logs for FBI/legal compliance and security investigations:
+
+### How to Use:
+1. **Select Date Range:** Choose from presets (Last 7/30/90 Days) or custom range
+2. **Search Scope:** Search all sites or just the currently selected site
+3. **IP Filter:** Enter an IP address to find all activity from that IP
+4. **Status Codes:** Optionally filter by status codes (2xx, 3xx, 4xx, 5xx)
+5. **Click "Search Historical Logs"** to query the archive database
+
+### Results:
+- Summary statistics (total requests, unique IPs, sites found, date range)
+- Preview table with first 1000 results
+- Download full results as CSV
+- All results include: timestamp, IP, status, method, path, site, environment
+
+### How Archiving Works:
+- **Automatic:** Every time you collect new logs, existing logs are automatically archived
+- **Compression:** Archives are compressed with gzip (~90% size reduction)
+- **Retention:** Archives kept for **90 days** (configurable)
+- **Database Index:** SQLite database enables instant IP/date searches without parsing GB of logs
+- **Compliance:** Each archive includes metadata.json with SHA256 checksums for audit trails
+
+### Storage Requirements:
+- **Per site:** ~1.4GB for 90 days of compressed logs
+- **5 sites:** ~7GB for 90 days
+- **Database index:** ~1-2GB for 90 days (all sites combined)
+
+### Directory Structure:
+```
+~/site-logs/
+├── current/{site_name}_{env}/          # Active logs (uncompressed)
+├── archive/{site_name}_{env}/          # Historical archives
+│   ├── 2025-12-18/
+│   │   ├── app_server_*/
+│   │   │   ├── nginx-access.log.gz
+│   │   │   └── php-error.log.gz
+│   │   └── metadata.json             # Checksums, timestamps
+│   └── 2025-12-17/
+└── index/logs.db                       # SQLite search index
+```
 
 ## Explore the tabs:
 
@@ -171,12 +253,35 @@ docker run -p 8501:8501 \
     - View all PHP errors from all app servers.
     - Filter by Fatal Error, Warning, or Info (Notice) using the dropdown.
     - Download filtered PHP error logs as CSV.
+- **WordPress Analysis:** WordPress-specific security and usage analysis.
+- **Performance Metrics:** Endpoint performance, bandwidth, cache analysis, traffic patterns.
+- **Archive Management (NEW!):**
+    - View all archived collections with statistics
+    - See storage usage and retention info
+    - Manual cleanup of old archives
+    - Filter archives by site and environment
+
+## Project Structure
+
+The project consists of several modules for clean separation of concerns:
+
+- **`main.py`** - Main Streamlit dashboard application
+- **`archive_manager.py`** - Log archiving, compression, and SQLite indexing
+- **`auto_collect_logs.py`** - Automated log collection script (cron-friendly)
+- **`log_parser.py`** - Nginx and PHP log parsing functions
+- **`analysis.py`** - Security analysis (brute force, SQLi, XSS, AbuseIPDB)
+- **`wordpress_analysis.py`** - WordPress-specific attack detection
+- **`performance_metrics.py`** - Performance and traffic analysis
+- **`terminus.py`** - Pantheon/Terminus API integration
+- **`ui.py`** - UI components and report generation
 
 ## Customization
 
-- **Log Format:** The parser is tailored for Pantheon Nginx logs with GoAccess-style formatting. If your log format differs, adjust the `parse_nginx_log` function.
-- **PHP Error Log Format:** The PHP error parser supports standard PHP error log lines. For custom formats, adjust the `parse_php_error_log` function.
+- **Log Format:** The parser is tailored for Pantheon Nginx logs with GoAccess-style formatting. If your log format differs, adjust the `parse_nginx_log` function in `log_parser.py`.
+- **PHP Error Log Format:** The PHP error parser supports standard PHP error log lines. For custom formats, adjust the `parse_php_error_log` function in `log_parser.py`.
 - **Hostname Resolution:** The dashboard attempts to resolve IPs to hostnames; this may be slow for many IPs.
+- **Retention Policy:** Default is 90 days. Change `DEFAULT_RETENTION_DAYS` in `archive_manager.py` or use `cleanup_old_archives(days)`.
+- **Archive Location:** Default is `~/site-logs/`. Change `LOGS_BASE` in `archive_manager.py` to customize.
 
 ## Troubleshooting
 

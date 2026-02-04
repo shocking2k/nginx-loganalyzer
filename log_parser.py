@@ -1,4 +1,5 @@
 import re
+import gzip
 from datetime import datetime
 import pandas as pd
 import streamlit as st
@@ -70,6 +71,76 @@ def parse_nginx_log(log_path):
         return df
     except Exception as e:
         st.warning(f"Couldn't parse {log_path}: {str(e)}")
+        return pd.DataFrame()
+
+@st.cache_data
+def parse_compressed_nginx_log(gz_path):
+    """Parse a gzipped nginx log file"""
+    ip_regex = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$|^[a-fA-F0-9:]+$")  # IPv4 or IPv6
+
+    try:
+        with gzip.open(gz_path, 'rt', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+
+        parsed_data = []
+        for line in lines:
+            try:
+                quoted = re.findall(r'"([^"]*)"', line)
+                bracketed = re.findall(r'\[([^\]]+)\]', line)
+                if len(quoted) < 4 or len(bracketed) < 1:
+                    continue
+
+                time_str = bracketed[0]
+                request = quoted[0]
+                referrer = quoted[1]
+                user_agent = quoted[2]
+                proxy_chain = quoted[3]
+
+                status_match = re.search(r'"\s*(\d{3})\s+(\d+)\s', line)
+                if status_match:
+                    status = int(status_match.group(1))
+                    size = int(status_match.group(2))
+                else:
+                    status = None
+                    size = None
+
+                req_time_match = re.search(r'" ([\d\.]+) "', line)
+                req_time = req_time_match.group(1) if req_time_match else None
+
+                method, path, protocol = ('', '', '')
+                req_parts = request.split()
+                if len(req_parts) == 3:
+                    method, path, protocol = req_parts
+
+                try:
+                    time = datetime.strptime(time_str, '%d/%b/%Y:%H:%M:%S %z')
+                except Exception:
+                    time = None
+
+                real_ip = proxy_chain.split(',')[0].strip() if proxy_chain else '-'
+                ip = real_ip if ip_regex.match(real_ip) else '-'
+
+                parsed_data.append({
+                    'ip': ip,
+                    'time': time,
+                    'method': method,
+                    'path': path,
+                    'protocol': protocol,
+                    'status': status,
+                    'size': size,
+                    'referrer': referrer,
+                    'user_agent': user_agent,
+                    'req_time': req_time,
+                    'proxy_chain': proxy_chain
+                })
+            except Exception as e:
+                continue
+        df = pd.DataFrame(parsed_data)
+        if not df.empty:
+            df['status'] = pd.to_numeric(df['status'], errors='coerce')
+        return df
+    except Exception as e:
+        st.warning(f"Couldn't parse {gz_path}: {str(e)}")
         return pd.DataFrame()
 
 @st.cache_data
