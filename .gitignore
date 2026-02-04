@@ -1,4 +1,43 @@
+# IDE
 .idea/
+.vscode/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# Log Files and Data
+site-logs/
+*.log
+*.log.gz
+
+# Database
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Environment Variables
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy
 nginx_dashboard.py
 
 # Python virtual environment

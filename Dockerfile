@@ -58,8 +58,10 @@ USER appuser
 # Add local Python packages to PATH
 ENV PATH=/home/appuser/.local/bin:$PATH
 
+
 # Expose Streamlit default port
 EXPOSE 8501
+
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
@@ -73,3 +75,4 @@ ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
 # Run the application with startup script
 CMD ["./startup.sh"]
+

@@ -1,11 +1,11 @@
 import os
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.express as px
 import shutil
 
-from log_parser import parse_nginx_log, parse_php_error_log
+from log_parser import parse_nginx_log, parse_php_error_log, parse_compressed_nginx_log
 from analysis import detect_brute_force, detect_sql_injection, detect_xss, check_abuseipdb
 from terminus import get_site_list, get_env_list, get_site_uuid, collect_logs
 from ui import generate_goaccess_report
@@ -30,7 +30,7 @@ st.markdown("""
 
 logs_dir = None
 if 'site_name' in st.session_state and 'env' in st.session_state:
-    logs_dir = os.path.expanduser(f"~/site-logs/{st.session_state['site_name']}_{st.session_state['env']}")
+    logs_dir = os.path.join(CURRENT_DIR, f"{st.session_state['site_name']}_{st.session_state['env']}")
 
 with st.sidebar:
     st.header("Configuration")
@@ -59,9 +59,96 @@ with st.sidebar:
 
     st.session_state['abuseipdb_api_key'] = st.text_input("AbuseIPDB API Key (Optional)", type="password", help="Get your API key at https://www.abuseipdb.com/register")
 
+    st.markdown("---")
+    st.header("Historical Search")
+
+    # Date range picker with presets
+    date_preset = st.selectbox("Quick Select",
+        ["Last 7 Days", "Last 30 Days", "Last 90 Days", "Custom Range"],
+        key="date_preset")
+
+    if date_preset == "Custom Range":
+        date_range = st.date_input("Date Range",
+            value=(datetime.now().date() - timedelta(days=7), datetime.now().date()),
+            key="custom_date_range")
+    else:
+        # Auto-calculate based on preset
+        if date_preset == "Last 7 Days":
+            days = 7
+        elif date_preset == "Last 30 Days":
+            days = 30
+        else:  # Last 90 Days
+            days = 90
+        date_range = (datetime.now().date() - timedelta(days=days), datetime.now().date())
+
+    # Site filter (all sites or specific site)
+    search_all_sites = st.checkbox("Search all sites", value=True, key="search_all_sites")
+
+    # IP filter
+    ip_filter = st.text_input("Filter by IP Address (optional)", key="ip_filter")
+
+    # Additional filters
+    status_filter_options = st.multiselect("Status Codes (optional)",
+        ["2xx Success", "3xx Redirect", "4xx Client Error", "5xx Server Error"],
+        default=[], key="status_filter")
+
+    if st.button("Search Historical Logs"):
+        with st.spinner("Searching archives..."):
+            # Convert status filter labels to code ranges
+            status_codes = []
+            for status_label in status_filter_options:
+                if "2xx" in status_label:
+                    status_codes.append("2xx")
+                elif "3xx" in status_label:
+                    status_codes.append("3xx")
+                elif "4xx" in status_label:
+                    status_codes.append("4xx")
+                elif "5xx" in status_label:
+                    status_codes.append("5xx")
+
+            # Determine search scope
+            search_site_name = None if search_all_sites else site_name
+            search_env = None if search_all_sites else env
+
+            # Perform search
+            if ip_filter:
+                # IP-based search
+                results = search_logs_by_ip(
+                    ip_filter,
+                    start_date=date_range[0] if isinstance(date_range, tuple) else date_range,
+                    end_date=date_range[1] if isinstance(date_range, tuple) and len(date_range) > 1 else date_range,
+                    site_name=search_site_name,
+                    env=search_env
+                )
+            else:
+                # Date range search
+                results = search_logs_by_date_range(
+                    start_date=date_range[0] if isinstance(date_range, tuple) else date_range,
+                    end_date=date_range[1] if isinstance(date_range, tuple) and len(date_range) > 1 else date_range,
+                    site_name=search_site_name,
+                    env=search_env,
+                    status_codes=status_codes if status_codes else None
+                )
+
+            # Store results in session state
+            st.session_state['search_results'] = results
+            st.session_state['search_params'] = {
+                'date_range': date_range,
+                'ip_filter': ip_filter,
+                'status_filter': status_filter_options,
+                'all_sites': search_all_sites
+            }
+
+            if results:
+                st.success(f"Found {len(results)} matching log entries!")
+            else:
+                st.info("No matching logs found.")
+
+    st.markdown("---")
+
     log_container = st.container()
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     if col1.button("Collect Logs"):
         with st.spinner("Collecting logs..."):
             site_uuid = get_site_uuid(site_name)
@@ -80,9 +167,16 @@ with st.sidebar:
                 st.error("Invalid site name")
 
     if col2.button("Clear Logs"):
-        logs_dir_temp = os.path.expanduser(f"~/site-logs")
+        logs_dir_temp = CURRENT_DIR
         if os.path.exists(logs_dir_temp):
             try:
+                # Delete only the contents of the directory, not the directory itself
+                for item in os.listdir(logs_dir_temp):
+                    item_path = os.path.join(logs_dir_temp, item)
+                    if os.path.isfile(item_path):
+                        os.remove(item_path)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
                 # Delete only the contents of the directory, not the directory itself
                 for item in os.listdir(logs_dir_temp):
                     item_path = os.path.join(logs_dir_temp, item)
@@ -99,6 +193,36 @@ with st.sidebar:
                 st.error(f"Failed to clear logs: {str(e)}")
         else:
             st.warning("No logs directory found to clear.")
+
+    if col3.button("Archive All Current"):
+        with st.spinner("Archiving all current logs..."):
+            from archive_manager import archive_current_logs
+            archived_count = 0
+            archived_sites = []
+
+            # Find all site directories in current/
+            if os.path.exists(CURRENT_DIR):
+                for site_env_dir in os.listdir(CURRENT_DIR):
+                    site_env_path = os.path.join(CURRENT_DIR, site_env_dir)
+                    if os.path.isdir(site_env_path):
+                        # Parse site_name and env from directory name
+                        parts = site_env_dir.rsplit('_', 1)
+                        if len(parts) == 2:
+                            site_name_to_archive, env_to_archive = parts
+                            try:
+                                archive_path = archive_current_logs(site_name_to_archive, env_to_archive, datetime.now().date())
+                                if archive_path:
+                                    archived_count += 1
+                                    archived_sites.append(f"{site_name_to_archive} ({env_to_archive})")
+                            except Exception as e:
+                                st.warning(f"Failed to archive {site_env_dir}: {e}")
+
+                if archived_count > 0:
+                    st.success(f"Archived {archived_count} site(s): {', '.join(archived_sites)}")
+                else:
+                    st.info("No current logs found to archive")
+            else:
+                st.warning("No current logs directory found")
 
     if st.button("Generate Report"):
         if logs_dir and os.path.exists(logs_dir):
@@ -126,7 +250,80 @@ with st.sidebar:
 
 logs_dir = None
 if 'site_name' in st.session_state and 'env' in st.session_state:
-    logs_dir = os.path.expanduser(f"~/site-logs/{st.session_state['site_name']}_{st.session_state['env']}")
+    logs_dir = os.path.join(CURRENT_DIR, f"{st.session_state['site_name']}_{st.session_state['env']}")
+
+# Display search results in main section (independent of current logs)
+if 'search_results' in st.session_state and st.session_state['search_results']:
+    st.markdown("### 🔍 Historical Search Results")
+    search_params = st.session_state.get('search_params', {})
+
+    # Display search summary
+    results_df = pd.DataFrame(st.session_state['search_results'])
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Results", len(results_df))
+    with col2:
+        st.metric("Unique IPs", results_df['ip_address'].nunique() if 'ip_address' in results_df.columns else 0)
+    with col3:
+        st.metric("Sites Found", results_df['site_name'].nunique() if 'site_name' in results_df.columns else 0)
+    with col4:
+        date_range = search_params.get('date_range', '')
+        if isinstance(date_range, tuple):
+            st.metric("Date Range", f"{date_range[0]} to {date_range[1]}")
+
+    # Show breakdown by site/environment
+    if 'site_name' in results_df.columns and 'environment' in results_df.columns:
+        st.subheader("Results by Site")
+        site_summary = results_df.groupby(['site_name', 'environment']).agg({
+            'ip_address': 'count',
+            'status_code': lambda x: f"{(x >= 400).sum()}/{len(x)}"
+        }).reset_index()
+        site_summary.columns = ['Site', 'Environment', 'Requests', 'Errors']
+
+        # Make it more readable
+        site_summary['Site/Env'] = site_summary['Site'] + ' (' + site_summary['Environment'] + ')'
+        display_summary = site_summary[['Site/Env', 'Requests', 'Errors']]
+
+        st.dataframe(display_summary, width='stretch', hide_index=True)
+
+    # Display preview table
+    st.subheader("Detailed Results (first 1000 entries)")
+    preview_df = results_df.head(1000).copy()
+    if not preview_df.empty:
+        # Format timestamp for better readability
+        if 'log_timestamp' in preview_df.columns:
+            preview_df['timestamp'] = pd.to_datetime(preview_df['log_timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Create a combined site column for clarity
+        if 'site_name' in preview_df.columns and 'environment' in preview_df.columns:
+            preview_df['site'] = preview_df['site_name'] + ' (' + preview_df['environment'] + ')'
+
+        # Format for display with better column order
+        display_cols = ['timestamp', 'site', 'ip_address', 'status_code', 'method', 'path']
+        available_cols = [col for col in display_cols if col in preview_df.columns]
+
+        # Rename columns for display
+        column_names = {
+            'timestamp': 'Time',
+            'site': 'Site',
+            'ip_address': 'IP Address',
+            'status_code': 'Status',
+            'method': 'Method',
+            'path': 'Path'
+        }
+
+        display_df = preview_df[available_cols].rename(columns=column_names)
+        st.dataframe(display_df, width='stretch', hide_index=True)
+
+        # Download option
+        st.download_button(
+            label="Download Full Search Results as CSV",
+            data=results_df.to_csv(index=False),
+            file_name=f"search_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+
+    st.markdown("---")
 
 if logs_dir and os.path.exists(logs_dir):
     if 'site_name' in st.session_state and st.session_state['site_name']:
@@ -186,6 +383,7 @@ if logs_dir and os.path.exists(logs_dir):
                 fig = px.area(time_df, x=time_df.index, y=['requests', 'errors'],
                               title="Requests Over Time")
                 st.plotly_chart(fig, width='stretch')
+                st.plotly_chart(fig, width='stretch')
             else:
                 st.info("No valid timestamps in logs for time series chart.")
             st.download_button(
@@ -203,14 +401,17 @@ if logs_dir and os.path.exists(logs_dir):
                 top_paths = df['path'].value_counts().head(10).reset_index()
                 top_paths.columns = ['Path', 'Count']
                 st.dataframe(top_paths, width='stretch')
+                st.dataframe(top_paths, width='stretch')
             with col2:
                 st.subheader("Status Codes")
                 top_status = df['status'].value_counts().head(10).reset_index()
                 top_status.columns = ['Status', 'Count']
                 st.dataframe(top_status, width='stretch')
+                st.dataframe(top_status, width='stretch')
             st.subheader("User Agents")
             top_agents = df['user_agent'].value_counts().head(10).reset_index()
             top_agents.columns = ['User Agent', 'Count']
+            st.dataframe(top_agents, width='stretch')
             st.dataframe(top_agents, width='stretch')
             st.subheader("Visitor Hostnames and IPs")
             top_ips = df['ip'].value_counts().head(10).reset_index()
@@ -225,10 +426,12 @@ if logs_dir and os.path.exists(logs_dir):
 
             top_ips['Hostname'] = top_ips['IP Address'].apply(resolve_hostname)
             st.dataframe(top_ips[['IP Address', 'Hostname', 'Count']], width='stretch')
+            st.dataframe(top_ips[['IP Address', 'Hostname', 'Count']], width='stretch')
             st.subheader("Top Referrers")
             top_referrers = df['referrer'].value_counts().head(10).reset_index()
             top_referrers.columns = ['Referrer', 'Count']
             top_referrers['Referrer'] = top_referrers['Referrer'].replace('-', '[root]')
+            st.dataframe(top_referrers, width='stretch')
             st.dataframe(top_referrers, width='stretch')
 
         with tab3:
@@ -238,6 +441,7 @@ if logs_dir and os.path.exists(logs_dir):
                 display_cols = ['time', 'status', 'path', 'ip', 'referrer', 'user_agent']
                 error_display = error_df[display_cols].sort_values('time', ascending=False).reset_index(drop=True)
                 error_display.columns = ['Time', 'Status', 'Path', 'IP', 'Referrer', 'User Agent']
+                st.dataframe(error_display, width='stretch')
                 st.dataframe(error_display, width='stretch')
             else:
                 st.info("No errors found in logs")
@@ -256,14 +460,17 @@ if logs_dir and os.path.exists(logs_dir):
             high_error_ips.columns = ['IP Address', 'Total Requests', 'Error Requests', 'Error Rate']
             st.subheader("IPs with High Error Rate (>50%)")
             st.dataframe(high_error_ips, width='stretch')
+            st.dataframe(high_error_ips, width='stretch')
 
             notfound_ips = df[df['status'] == 404]['ip'].value_counts().head(10).reset_index()
             notfound_ips.columns = ['IP Address', '404 Count']
             st.subheader("IPs with Most 404s")
             st.dataframe(notfound_ips, width='stretch')
+            st.dataframe(notfound_ips, width='stretch')
             top_request_ips = df['ip'].value_counts().head(10).reset_index()
             top_request_ips.columns = ['IP Address', 'Request Count']
             st.subheader("Top Requesting IPs")
+            st.dataframe(top_request_ips, width='stretch')
             st.dataframe(top_request_ips, width='stretch')
 
         with tab5:
@@ -273,19 +480,23 @@ if logs_dir and os.path.exists(logs_dir):
             top_ext.columns = ['Extension', 'Count']
             top_ext['Extension'] = top_ext['Extension'].replace('', '[root]')
             st.dataframe(top_ext, width='stretch')
+            st.dataframe(top_ext, width='stretch')
 
             st.subheader("Top Requested Files")
             top_files = df['path'].value_counts().head(10).reset_index()
             top_files.columns = ['File Path', 'Count']
             st.dataframe(top_files, width='stretch')
+            st.dataframe(top_files, width='stretch')
 
             st.subheader("File Extension Distribution (Bar Chart)")
             fig_bar = px.bar(top_ext, x='Extension', y='Count', title="Top Requested File Extensions")
+            st.plotly_chart(fig_bar, width='stretch')
             st.plotly_chart(fig_bar, width='stretch')
 
             st.subheader("File Extension Distribution (Pie Chart)")
             fig_pie = px.pie(top_ext, names='Extension', values='Count',
                              title="Top Requested File Extensions (Pie)")
+            st.plotly_chart(fig_pie, width='stretch')
             st.plotly_chart(fig_pie, width='stretch')
 
             st.markdown("""
@@ -311,10 +522,12 @@ if logs_dir and os.path.exists(logs_dir):
                 top_bots = bots_df['user_agent'].value_counts().head(10).reset_index()
                 top_bots.columns = ['User Agent', 'Request Count']
                 st.dataframe(top_bots, width='stretch')
+                st.dataframe(top_bots, width='stretch')
 
                 st.subheader("Bot/Crawler Activity by Path")
                 bot_paths = bots_df['path'].value_counts().head(10).reset_index()
                 bot_paths.columns = ['Path', 'Request Count']
+                st.dataframe(bot_paths, width='stretch')
                 st.dataframe(bot_paths, width='stretch')
 
                 st.subheader("Bot/Crawler Error Rate")
@@ -323,6 +536,7 @@ if logs_dir and os.path.exists(logs_dir):
 
                 st.subheader("All Bot/Crawler Requests (sample output)")
                 sample_bot_data = bots_df[['time', 'ip', 'path', 'status', 'user_agent']].head(50)
+                st.dataframe(sample_bot_data, width='stretch')
                 st.dataframe(sample_bot_data, width='stretch')
 
                 csv_bot_data = bots_df[['time', 'ip', 'path', 'status', 'user_agent']].to_csv(index=False)
@@ -343,6 +557,7 @@ if logs_dir and os.path.exists(logs_dir):
             brute_force_suspects = detect_brute_force(df)
             if not brute_force_suspects.empty:
                 st.dataframe(brute_force_suspects, width='stretch')
+                st.dataframe(brute_force_suspects, width='stretch')
             else:
                 st.info("No potential brute force attacks detected.")
 
@@ -350,12 +565,14 @@ if logs_dir and os.path.exists(logs_dir):
             sql_injection_df = detect_sql_injection(df)
             if not sql_injection_df.empty:
                 st.dataframe(sql_injection_df[['time', 'ip', 'path', 'referrer']], width='stretch')
+                st.dataframe(sql_injection_df[['time', 'ip', 'path', 'referrer']], width='stretch')
             else:
                 st.info("No potential SQL injection attempts detected.")
 
             st.subheader("Potential XSS Attacks")
             xss_df = detect_xss(df)
             if not xss_df.empty:
+                st.dataframe(xss_df[['time', 'ip', 'path', 'referrer']], width='stretch')
                 st.dataframe(xss_df[['time', 'ip', 'path', 'referrer']], width='stretch')
             else:
                 st.info("No potential XSS attacks detected.")
@@ -370,6 +587,7 @@ if logs_dir and os.path.exists(logs_dir):
                             if report:
                                 abuse_reports.append(report)
                         if abuse_reports:
+                            st.dataframe(abuse_reports, width='stretch')
                             st.dataframe(abuse_reports, width='stretch')
                         else:
                             st.info("No abuse reports found for the high-error-rate IPs.")
@@ -386,6 +604,7 @@ if logs_dir and os.path.exists(logs_dir):
                 filtered_df = php_df[php_df['type'] == error_type]
             else:
                 filtered_df = php_df
+            st.dataframe(filtered_df, width='stretch')
             st.dataframe(filtered_df, width='stretch')
             st.download_button(
                 label="Download PHP Error Log as CSV",

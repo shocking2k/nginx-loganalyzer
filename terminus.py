@@ -3,24 +3,38 @@ import json
 import streamlit as st
 import os
 import shutil
+from datetime import datetime
+from archive_manager import archive_current_logs, cleanup_old_archives, CURRENT_DIR, DEFAULT_RETENTION_DAYS
+
+# Use full path to terminus binary to ensure it's found when run from Streamlit
+TERMINUS_BIN = "/opt/homebrew/bin/terminus"
 
 def get_site_list():
     try:
+        env = os.environ.copy()
+        env['TERMINUS_ALLOW_UNSUPPORTED_NEWER_PHP'] = '1'
         result = subprocess.run(
-            ["terminus", "site:list", "--format=json"],
-            capture_output=True, text=True, check=True
+            [TERMINUS_BIN, "site:list", "--format=json"],
+            capture_output=True, text=True, check=True, env=env
         )
         sites = json.loads(result.stdout)
         return sorted([v["name"] for v in sites.values()])
+    except subprocess.CalledProcessError as e:
+        st.error(f"Could not fetch site list: {e}")
+        st.error(f"STDOUT: {e.stdout}")
+        st.error(f"STDERR: {e.stderr}")
+        return []
     except Exception as e:
         st.warning(f"Could not fetch site list: {e}")
         return []
 
 def get_env_list(site_name):
     try:
+        env = os.environ.copy()
+        env['TERMINUS_ALLOW_UNSUPPORTED_NEWER_PHP'] = '1'
         result = subprocess.run(
-            ["terminus", "env:list", site_name, "--format=json"],
-            capture_output=True, text=True, check=True
+            [TERMINUS_BIN, "env:list", site_name, "--format=json"],
+            capture_output=True, text=True, check=True, env=env
         )
         envs = json.loads(result.stdout)
         return sorted(envs.keys())
@@ -30,9 +44,11 @@ def get_env_list(site_name):
 
 def get_site_uuid(site_name):
     try:
+        env = os.environ.copy()
+        env['TERMINUS_ALLOW_UNSUPPORTED_NEWER_PHP'] = '1'
         result = subprocess.run(
-            ["terminus", "site:list", "--format=json"],
-            capture_output=True, text=True, check=True
+            [TERMINUS_BIN, "site:list", "--format=json"],
+            capture_output=True, text=True, check=True, env=env
         )
         sites = json.loads(result.stdout)
         return next((k for k, v in sites.items() if v["name"].lower() == site_name.lower()), None)
@@ -41,9 +57,30 @@ def get_site_uuid(site_name):
         return None
 
 def collect_logs(site_uuid, env, site_name):
-    logs_dir = os.path.expanduser(f"~/site-logs/{site_name}_{env}")
+    # Use new directory structure: ~/site-logs/current/{site}_{env}
+    logs_dir = os.path.join(CURRENT_DIR, f"{site_name}_{env}")
+
+    # Archive existing logs if they exist (automatic archiving)
     if os.path.exists(logs_dir):
+        yield "Archiving existing logs..."
+        try:
+            archive_path = archive_current_logs(site_name, env, datetime.now().date())
+            if archive_path:
+                yield f"Archived logs to: {archive_path}"
+        except Exception as e:
+            yield f"Warning: Failed to archive logs: {e}"
+
+        # Remove current logs after archiving
         shutil.rmtree(logs_dir)
+
+    # Cleanup old archives (older than retention period)
+    try:
+        deleted_count = cleanup_old_archives(DEFAULT_RETENTION_DAYS)
+        if deleted_count > 0:
+            yield f"Cleaned up {deleted_count} old archive(s) (>{DEFAULT_RETENTION_DAYS} days)"
+    except Exception as e:
+        yield f"Warning: Failed to cleanup old archives: {e}"
+
     os.makedirs(logs_dir, exist_ok=True)
 
     app_servers = subprocess.check_output(
