@@ -11,10 +11,11 @@ import re
 
 # Base paths for log storage
 LOGS_BASE = os.path.expanduser("~/site-logs")
+DB_BASE = os.path.expanduser("~/db-dir")
 CURRENT_DIR = os.path.join(LOGS_BASE, "current")
 ARCHIVE_DIR = os.path.join(LOGS_BASE, "archive")
 INDEX_DIR = os.path.join(LOGS_BASE, "index")
-DB_PATH = os.path.join(INDEX_DIR, "logs.db")
+DB_PATH = os.path.join(DB_BASE, "logs.db")
 
 # Retention policy (days)
 DEFAULT_RETENTION_DAYS = 90
