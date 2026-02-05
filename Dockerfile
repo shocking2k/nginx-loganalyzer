@@ -33,6 +33,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -L https://github.com/pantheon-systems/terminus/releases/latest/download/terminus.phar -o /usr/local/bin/terminus \
     && chmod +x /usr/local/bin/terminus
 
+RUN mkdir -p /opt/homebrew/bin && ln -s /usr/local/bin/terminus /opt/homebrew/bin/terminus
+
 # Create non-root user
 RUN useradd -m -u 1000 -s /bin/bash appuser
 
