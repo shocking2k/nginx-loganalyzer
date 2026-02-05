@@ -17,6 +17,9 @@ from performance_metrics import (identify_slow_endpoints, analyze_bandwidth_usag
                                   analyze_cache_performance, analyze_request_methods,
                                   analyze_traffic_patterns, analyze_status_code_distribution,
                                   get_performance_summary)
+from archive_manager import (CURRENT_DIR, ARCHIVE_DIR, search_logs_by_ip,
+                             search_logs_by_date_range, get_archived_collections,
+                             get_archive_statistics, extract_compressed_log)
 
 st.set_page_config(layout="wide", page_title="Nginx Log Analyzer V2")
 st.title("📊Nginx Log Analyzer V2")
@@ -177,13 +180,6 @@ with st.sidebar:
                         os.remove(item_path)
                     elif os.path.isdir(item_path):
                         shutil.rmtree(item_path)
-                # Delete only the contents of the directory, not the directory itself
-                for item in os.listdir(logs_dir_temp):
-                    item_path = os.path.join(logs_dir_temp, item)
-                    if os.path.isfile(item_path):
-                        os.remove(item_path)
-                    elif os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
                 st.success("Logs have been cleared successfully!")
                 if 'site_name' in st.session_state:
                     del st.session_state['site_name']
@@ -329,9 +325,9 @@ if logs_dir and os.path.exists(logs_dir):
     if 'site_name' in st.session_state and st.session_state['site_name']:
         env_display = st.session_state['env'] if 'env' in st.session_state else ''
         st.info(f"Currently displaying logs for: **{st.session_state['site_name']}** ({env_display})")
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs(
         ["Overview", "Requests", "Errors", "Security", "File Types", "Bot & Crawler Detection",
-         "Advanced Security", "PHP Errors", "WordPress Analysis", "Performance Metrics"])
+         "Advanced Security", "PHP Errors", "WordPress Analysis", "Performance Metrics", "Archive Management"])
 
     all_logs = []
     php_error_logs = []
@@ -383,7 +379,6 @@ if logs_dir and os.path.exists(logs_dir):
                 fig = px.area(time_df, x=time_df.index, y=['requests', 'errors'],
                               title="Requests Over Time")
                 st.plotly_chart(fig, width='stretch')
-                st.plotly_chart(fig, width='stretch')
             else:
                 st.info("No valid timestamps in logs for time series chart.")
             st.download_button(
@@ -401,17 +396,14 @@ if logs_dir and os.path.exists(logs_dir):
                 top_paths = df['path'].value_counts().head(10).reset_index()
                 top_paths.columns = ['Path', 'Count']
                 st.dataframe(top_paths, width='stretch')
-                st.dataframe(top_paths, width='stretch')
             with col2:
                 st.subheader("Status Codes")
                 top_status = df['status'].value_counts().head(10).reset_index()
                 top_status.columns = ['Status', 'Count']
                 st.dataframe(top_status, width='stretch')
-                st.dataframe(top_status, width='stretch')
             st.subheader("User Agents")
             top_agents = df['user_agent'].value_counts().head(10).reset_index()
             top_agents.columns = ['User Agent', 'Count']
-            st.dataframe(top_agents, width='stretch')
             st.dataframe(top_agents, width='stretch')
             st.subheader("Visitor Hostnames and IPs")
             top_ips = df['ip'].value_counts().head(10).reset_index()
@@ -426,12 +418,10 @@ if logs_dir and os.path.exists(logs_dir):
 
             top_ips['Hostname'] = top_ips['IP Address'].apply(resolve_hostname)
             st.dataframe(top_ips[['IP Address', 'Hostname', 'Count']], width='stretch')
-            st.dataframe(top_ips[['IP Address', 'Hostname', 'Count']], width='stretch')
             st.subheader("Top Referrers")
             top_referrers = df['referrer'].value_counts().head(10).reset_index()
             top_referrers.columns = ['Referrer', 'Count']
             top_referrers['Referrer'] = top_referrers['Referrer'].replace('-', '[root]')
-            st.dataframe(top_referrers, width='stretch')
             st.dataframe(top_referrers, width='stretch')
 
         with tab3:
@@ -441,7 +431,6 @@ if logs_dir and os.path.exists(logs_dir):
                 display_cols = ['time', 'status', 'path', 'ip', 'referrer', 'user_agent']
                 error_display = error_df[display_cols].sort_values('time', ascending=False).reset_index(drop=True)
                 error_display.columns = ['Time', 'Status', 'Path', 'IP', 'Referrer', 'User Agent']
-                st.dataframe(error_display, width='stretch')
                 st.dataframe(error_display, width='stretch')
             else:
                 st.info("No errors found in logs")
@@ -460,17 +449,14 @@ if logs_dir and os.path.exists(logs_dir):
             high_error_ips.columns = ['IP Address', 'Total Requests', 'Error Requests', 'Error Rate']
             st.subheader("IPs with High Error Rate (>50%)")
             st.dataframe(high_error_ips, width='stretch')
-            st.dataframe(high_error_ips, width='stretch')
 
             notfound_ips = df[df['status'] == 404]['ip'].value_counts().head(10).reset_index()
             notfound_ips.columns = ['IP Address', '404 Count']
             st.subheader("IPs with Most 404s")
             st.dataframe(notfound_ips, width='stretch')
-            st.dataframe(notfound_ips, width='stretch')
             top_request_ips = df['ip'].value_counts().head(10).reset_index()
             top_request_ips.columns = ['IP Address', 'Request Count']
             st.subheader("Top Requesting IPs")
-            st.dataframe(top_request_ips, width='stretch')
             st.dataframe(top_request_ips, width='stretch')
 
         with tab5:
@@ -480,23 +466,19 @@ if logs_dir and os.path.exists(logs_dir):
             top_ext.columns = ['Extension', 'Count']
             top_ext['Extension'] = top_ext['Extension'].replace('', '[root]')
             st.dataframe(top_ext, width='stretch')
-            st.dataframe(top_ext, width='stretch')
 
             st.subheader("Top Requested Files")
             top_files = df['path'].value_counts().head(10).reset_index()
             top_files.columns = ['File Path', 'Count']
             st.dataframe(top_files, width='stretch')
-            st.dataframe(top_files, width='stretch')
 
             st.subheader("File Extension Distribution (Bar Chart)")
             fig_bar = px.bar(top_ext, x='Extension', y='Count', title="Top Requested File Extensions")
-            st.plotly_chart(fig_bar, width='stretch')
             st.plotly_chart(fig_bar, width='stretch')
 
             st.subheader("File Extension Distribution (Pie Chart)")
             fig_pie = px.pie(top_ext, names='Extension', values='Count',
                              title="Top Requested File Extensions (Pie)")
-            st.plotly_chart(fig_pie, width='stretch')
             st.plotly_chart(fig_pie, width='stretch')
 
             st.markdown("""
@@ -522,12 +504,10 @@ if logs_dir and os.path.exists(logs_dir):
                 top_bots = bots_df['user_agent'].value_counts().head(10).reset_index()
                 top_bots.columns = ['User Agent', 'Request Count']
                 st.dataframe(top_bots, width='stretch')
-                st.dataframe(top_bots, width='stretch')
 
                 st.subheader("Bot/Crawler Activity by Path")
                 bot_paths = bots_df['path'].value_counts().head(10).reset_index()
                 bot_paths.columns = ['Path', 'Request Count']
-                st.dataframe(bot_paths, width='stretch')
                 st.dataframe(bot_paths, width='stretch')
 
                 st.subheader("Bot/Crawler Error Rate")
@@ -536,7 +516,6 @@ if logs_dir and os.path.exists(logs_dir):
 
                 st.subheader("All Bot/Crawler Requests (sample output)")
                 sample_bot_data = bots_df[['time', 'ip', 'path', 'status', 'user_agent']].head(50)
-                st.dataframe(sample_bot_data, width='stretch')
                 st.dataframe(sample_bot_data, width='stretch')
 
                 csv_bot_data = bots_df[['time', 'ip', 'path', 'status', 'user_agent']].to_csv(index=False)
@@ -557,7 +536,6 @@ if logs_dir and os.path.exists(logs_dir):
             brute_force_suspects = detect_brute_force(df)
             if not brute_force_suspects.empty:
                 st.dataframe(brute_force_suspects, width='stretch')
-                st.dataframe(brute_force_suspects, width='stretch')
             else:
                 st.info("No potential brute force attacks detected.")
 
@@ -565,14 +543,12 @@ if logs_dir and os.path.exists(logs_dir):
             sql_injection_df = detect_sql_injection(df)
             if not sql_injection_df.empty:
                 st.dataframe(sql_injection_df[['time', 'ip', 'path', 'referrer']], width='stretch')
-                st.dataframe(sql_injection_df[['time', 'ip', 'path', 'referrer']], width='stretch')
             else:
                 st.info("No potential SQL injection attempts detected.")
 
             st.subheader("Potential XSS Attacks")
             xss_df = detect_xss(df)
             if not xss_df.empty:
-                st.dataframe(xss_df[['time', 'ip', 'path', 'referrer']], width='stretch')
                 st.dataframe(xss_df[['time', 'ip', 'path', 'referrer']], width='stretch')
             else:
                 st.info("No potential XSS attacks detected.")
@@ -587,7 +563,6 @@ if logs_dir and os.path.exists(logs_dir):
                             if report:
                                 abuse_reports.append(report)
                         if abuse_reports:
-                            st.dataframe(abuse_reports, width='stretch')
                             st.dataframe(abuse_reports, width='stretch')
                         else:
                             st.info("No abuse reports found for the high-error-rate IPs.")
@@ -604,7 +579,6 @@ if logs_dir and os.path.exists(logs_dir):
                 filtered_df = php_df[php_df['type'] == error_type]
             else:
                 filtered_df = php_df
-            st.dataframe(filtered_df, width='stretch')
             st.dataframe(filtered_df, width='stretch')
             st.download_button(
                 label="Download PHP Error Log as CSV",
@@ -902,6 +876,100 @@ if logs_dir and os.path.exists(logs_dir):
 
         else:
             st.info("No logs available for performance analysis")
+
+    with tab11:
+        st.header("Archive Management")
+
+        # Get archive statistics
+        archive_stats = get_archive_statistics()
+
+        # Display overall statistics
+        st.subheader("Archive Statistics")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Collections", f"{archive_stats.get('total_collections', 0):,}")
+        with col2:
+            st.metric("Total Requests", f"{archive_stats.get('total_requests', 0):,}")
+        with col3:
+            st.metric("Unique IPs", f"{archive_stats.get('unique_ips', 0):,}")
+        with col4:
+            st.metric("Storage Used", f"{archive_stats.get('total_size_gb', 0):.2f} GB")
+
+        if archive_stats.get('oldest_date'):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Oldest Archive", archive_stats.get('oldest_date'))
+            with col2:
+                st.metric("Newest Archive", archive_stats.get('newest_date'))
+
+        st.markdown("---")
+
+        # List all archived collections
+        st.subheader("Archived Collections")
+
+        # Filter options
+        filter_col1, filter_col2 = st.columns(2)
+        with filter_col1:
+            filter_site = st.selectbox("Filter by Site", ["All Sites"] + (site_list if site_list else []), key="archive_filter_site")
+        with filter_col2:
+            filter_env = st.selectbox("Filter by Environment", ["All Environments", "dev", "test", "live"], key="archive_filter_env")
+
+        # Get archived collections with filters
+        collections = get_archived_collections(
+            site_name=None if filter_site == "All Sites" else filter_site,
+            env=None if filter_env == "All Environments" else filter_env
+        )
+
+        if collections:
+            # Convert to DataFrame for display
+            collections_df = pd.DataFrame(collections)
+
+            # Format for display
+            display_df = collections_df[['site_name', 'environment', 'collection_date', 'total_requests', 'unique_ips', 'compressed_size_mb']].copy()
+            display_df.columns = ['Site', 'Environment', 'Date', 'Requests', 'Unique IPs', 'Size (MB)']
+            display_df['Size (MB)'] = display_df['Size (MB)'].round(2)
+
+            st.dataframe(display_df, width='stretch')
+
+            # Show retention info
+            st.info(f"📅 Archives are automatically retained for **90 days**. Older archives are cleaned up when collecting new logs.")
+
+            # Manual cleanup option
+            st.markdown("---")
+            st.subheader("Manual Cleanup")
+            st.warning("⚠️ Use this with caution. This will permanently delete archives older than the specified retention period.")
+
+            cleanup_days = st.number_input("Delete archives older than (days)", min_value=1, max_value=365, value=90, key="cleanup_days")
+
+            if st.button("Delete Old Archives", type="secondary"):
+                with st.spinner("Cleaning up old archives..."):
+                    from archive_manager import cleanup_old_archives
+                    deleted_count = cleanup_old_archives(cleanup_days)
+                    if deleted_count > 0:
+                        st.success(f"Deleted {deleted_count} archive(s) older than {cleanup_days} days")
+                        st.experimental_rerun()
+                    else:
+                        st.info(f"No archives older than {cleanup_days} days found")
+
+        else:
+            st.info("No archived collections found. Archives will be created automatically when you collect logs.")
+
+        # Instructions
+        st.markdown("---")
+        st.markdown("""
+        ### How Archiving Works
+
+        - **Automatic**: Every time you click "Collect Logs", existing logs are automatically archived
+        - **Compressed**: Archives are compressed with gzip (~90% size reduction)
+        - **Searchable**: Use the "Historical Search" section in the sidebar to search archives
+        - **Retention**: Archives are kept for 90 days by default
+        - **Compliance**: Each archive includes metadata.json with checksums for audit trails
+
+        ### Storage Estimates
+        - **Per site**: ~1.4GB for 90 days of compressed logs
+        - **5 sites**: ~7GB for 90 days
+        - **Database index**: ~1-2GB for 90 days of all sites combined
+        """)
 
 else:
     st.info("Select site and env to begin analysis")

@@ -24,9 +24,6 @@ def get_site_list():
         st.error(f"STDOUT: {e.stdout}")
         st.error(f"STDERR: {e.stderr}")
         return []
-    except Exception as e:
-        st.warning(f"Could not fetch site list: {e}")
-        return []
 
 def get_env_list(site_name):
     try:
